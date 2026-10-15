@@ -24,6 +24,8 @@ import {
   TrendingUp,
   BookOpen,
   Copy,
+  Tag,
+  ExternalLink,
 } from 'lucide-react';
 import {
   startCodingSession,
@@ -69,8 +71,12 @@ export const CodingRoundPage = () => {
   const [runError, setRunError] = useState('');
   const [activeTestTab, setActiveTestTab] = useState(0);
 
-  // Submission confirmation modal state
-  const [showSubmitModal, setShowSubmitModal] = useState(false);
+  // Submission state tracking: 'idle' | 'submitting' | 'submitted' | 'error'
+  const [submissionState, setSubmissionState] = useState('idle');
+  const [submissionError, setSubmissionError] = useState('');
+  const [submissionResults, setSubmissionResults] = useState({}); // { [qId]: submittedAttemptData }
+  const [activeSubmitTab, setActiveSubmitTab] = useState(0);
+  const isSubmittingRef = useRef(false);
 
   // AI Coding Review state (strictly available post-submission or expiry)
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -136,6 +142,10 @@ export const CodingRoundPage = () => {
         setCodeMap(initialMap);
         setCurrentQuestionIndex(0);
         setSelectedLanguage('javascript');
+        setSubmissionState('idle');
+        setSubmissionError('');
+        setSubmissionResults({});
+        setActiveSubmitTab(0);
         setSessionState('active');
       } else {
         setError(res?.message || 'Failed to start coding round.');
@@ -231,29 +241,40 @@ export const CodingRoundPage = () => {
     }
   };
 
+  // Sync submission state when switching active question
+  useEffect(() => {
+    if (!sessionData || !activeQuestion) return;
+    const qId = activeQuestion.id || activeQuestion._id;
+    const attempt = sessionData.attempts?.find((a) => a.questionId === qId);
+    if (attempt?.status === 'submitted' || attempt?.status === 'expired') {
+      setSubmissionState('submitted');
+    } else {
+      setSubmissionState('idle');
+    }
+    setSubmissionError('');
+    setActiveSubmitTab(0);
+  }, [currentQuestionIndex, sessionData, activeQuestion]);
+
   // Submit current question
   const handleSubmitQuestion = useCallback(
     async (isAutoExpired = false) => {
+      // Race condition / duplicate submission guard
+      if (isSubmittingRef.current) return;
       if (!sessionDataRef.current || !activeQuestion) return;
+
       const qId = activeQuestion.id || activeQuestion._id;
+      const attempt = sessionDataRef.current.attempts?.find((a) => a.questionId === qId);
+      if (attempt?.status === 'submitted' || attempt?.status === 'expired') return;
+
       const key = `${qId}_${selectedLangRef.current}`;
       const codeToSave = codeMapRef.current[key] || '';
 
+      isSubmittingRef.current = true;
       setSubmitting(true);
-      setShowSubmitModal(false);
-      try {
-        // Save code first
-        try {
-          await saveCodingCode({
-            sessionId: sessionDataRef.current.sessionId,
-            questionId: qId,
-            language: selectedLangRef.current,
-            code: codeToSave,
-          });
-        } catch {
-          // Continue with submit even if save threw on deadline boundary
-        }
+      setSubmissionState('submitting');
+      setSubmissionError('');
 
+      try {
         const res = await submitCodingQuestion({
           sessionId: sessionDataRef.current.sessionId,
           questionId: qId,
@@ -272,7 +293,7 @@ export const CodingRoundPage = () => {
                 ...att,
                 ...submittedData,
                 status: updatedStatus,
-                submittedAt: new Date().toISOString(),
+                submittedAt: submittedData.submittedAt || new Date().toISOString(),
               };
             }
             return att;
@@ -283,18 +304,24 @@ export const CodingRoundPage = () => {
           };
         });
 
+        setSubmissionResults((prev) => ({
+          ...prev,
+          [qId]: submittedData,
+        }));
+
+        setSubmissionState('submitted');
         setRunResult(null);
         setRunError('');
 
-        // Check if there is a next question
-        if (currentQIndexRef.current < (sessionDataRef.current.questions.length - 1)) {
-          // Transition to next question
-          const nextIndex = currentQIndexRef.current + 1;
-          setCurrentQuestionIndex(nextIndex);
-        } else {
-          // Completed both questions
-          setSessionState('completed');
+        // If deadline expired on timer, auto-advance
+        if (isAutoExpired) {
+          if (currentQIndexRef.current < (sessionDataRef.current.questions.length - 1)) {
+            setCurrentQuestionIndex((prev) => prev + 1);
+          } else {
+            setSessionState('completed');
+          }
         }
+        // For early manual submission, remain on question to display complete evaluation results!
       } catch (err) {
         console.error('Submit error:', err);
         // If deadline expired on server, mark as expired locally and advance
@@ -310,18 +337,23 @@ export const CodingRoundPage = () => {
             return { ...prev, attempts: updatedAttempts };
           });
 
+          setSubmissionState('submitted');
           setRunResult(null);
           setRunError('');
 
           if (currentQIndexRef.current < (sessionDataRef.current.questions.length - 1)) {
-            setCurrentQuestionIndex(currentQIndexRef.current + 1);
+            setCurrentQuestionIndex((prev) => prev + 1);
           } else {
             setSessionState('completed');
           }
         } else {
-          setError(err.response?.data?.message || 'Failed to submit question.');
+          const errMsg =
+            err.response?.data?.message || err.message || 'Failed to submit question. Please try again.';
+          setSubmissionState('error');
+          setSubmissionError(errMsg);
         }
       } finally {
+        isSubmittingRef.current = false;
         setSubmitting(false);
       }
     },
@@ -528,8 +560,10 @@ export const CodingRoundPage = () => {
       setSecondsRemaining(diffSecs);
 
       if (diffSecs <= 0) {
-        // Deadline reached! Automatically submit and advance
-        handleSubmitQuestion(true);
+        // Deadline reached! Automatically submit if not already submitting
+        if (!isSubmittingRef.current) {
+          handleSubmitQuestion(true);
+        }
       }
     };
 
@@ -537,7 +571,7 @@ export const CodingRoundPage = () => {
     const interval = setInterval(updateTimer, 1000);
 
     return () => clearInterval(interval);
-  }, [sessionState, currentAttempt, handleSubmitQuestion]);
+  }, [sessionState, currentAttempt?.status, currentAttempt?.deadline, handleSubmitQuestion]);
 
   // Current code in editor
   const currentCode = activeQuestion
@@ -742,6 +776,15 @@ export const CodingRoundPage = () => {
                   <span className="text-xs px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 font-medium">
                     {activeQuestion.topic}
                   </span>
+                  {activeQuestion.tags && activeQuestion.tags.slice(0, 3).map((tag, idx) => (
+                    <span
+                      key={idx}
+                      className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-50/70 border border-indigo-100 text-indigo-700 font-medium flex items-center gap-1"
+                    >
+                      <Tag className="w-2.5 h-2.5 text-indigo-500" />
+                      <span>{tag}</span>
+                    </span>
+                  ))}
                 </div>
                 <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
                   {currentQuestionIndex + 1}. {activeQuestion.title}
@@ -751,6 +794,28 @@ export const CodingRoundPage = () => {
               {/* Description Body */}
               <div className="space-y-4 text-xs sm:text-sm text-slate-600 leading-relaxed">
                 <p>{activeQuestion.description}</p>
+
+                {/* Input & Output Format */}
+                {(activeQuestion.inputFormat || activeQuestion.outputFormat) && (
+                  <div className="space-y-2 pt-1 font-sans text-xs">
+                    {activeQuestion.inputFormat && (
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-0.5">
+                        <span className="font-semibold text-slate-700 block text-[11px] uppercase tracking-wider">
+                          Input Format:
+                        </span>
+                        <p className="text-slate-600">{activeQuestion.inputFormat}</p>
+                      </div>
+                    )}
+                    {activeQuestion.outputFormat && (
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-0.5">
+                        <span className="font-semibold text-slate-700 block text-[11px] uppercase tracking-wider">
+                          Output Format:
+                        </span>
+                        <p className="text-slate-600">{activeQuestion.outputFormat}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Examples */}
                 {activeQuestion.examples && activeQuestion.examples.length > 0 && (
@@ -794,6 +859,24 @@ export const CodingRoundPage = () => {
                         </li>
                       ))}
                     </ul>
+                  </div>
+                )}
+
+                {/* Attribution and Reference Source */}
+                {activeQuestion.attribution && (
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                    <span>{activeQuestion.attribution}</span>
+                    {activeQuestion.referenceUrl && (
+                      <a
+                        href={activeQuestion.referenceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-indigo-600 hover:text-indigo-700 font-medium flex items-center gap-1 hover:underline ml-2 flex-shrink-0"
+                      >
+                        <span>Reference</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
                   </div>
                 )}
               </div>
@@ -895,7 +978,7 @@ export const CodingRoundPage = () => {
                   <button
                     type="button"
                     id="submit-question-button"
-                    onClick={() => setShowSubmitModal(true)}
+                    onClick={() => handleSubmitQuestion(false)}
                     disabled={
                       submitting ||
                       running ||
@@ -934,6 +1017,25 @@ export const CodingRoundPage = () => {
                   </button>
                 </div>
               </div>
+
+              {/* Submission Error Notification */}
+              {submissionError && (
+                <div className="p-3.5 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 text-xs flex items-center justify-between gap-3 shadow-xs">
+                  <div className="flex items-center space-x-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                    <span>{submissionError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleSubmitQuestion(false)}
+                    disabled={submitting}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold flex items-center space-x-1 transition-all active:scale-95 disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Retry</span>
+                  </button>
+                </div>
+              )}
 
               {/* Secure Execution Output Console (Visible Sample Cases Only) */}
               {(running || runResult || runError) && (
@@ -1077,6 +1179,204 @@ export const CodingRoundPage = () => {
                 </div>
               )}
 
+              {/* SUBMISSION EVALUATION RESULTS */}
+              {(() => {
+                const qId = activeQuestion.id || activeQuestion._id;
+                const evalData = submissionResults[qId] || currentAttempt;
+                const isFinalized = evalData?.status === 'submitted' || evalData?.status === 'expired';
+                if (!isFinalized || (!evalData?.resultStatus && evalData?.status !== 'submitted')) return null;
+
+                const visibleTestResults = evalData.visibleResults || evalData.testResults || [];
+                const isAccepted = evalData.resultStatus === 'Accepted';
+
+                return (
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4 shadow-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                      <div className="flex items-center space-x-2.5">
+                        <div
+                          className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                            isAccepted
+                              ? 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+                              : 'bg-rose-50 text-rose-600 border border-rose-200'
+                          }`}
+                        >
+                          {isAccepted ? (
+                            <CheckCircle2 className="w-4 h-4" />
+                          ) : (
+                            <XCircle className="w-4 h-4" />
+                          )}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-sm font-bold text-slate-900">Evaluation Results</h3>
+                            <span
+                              className={`text-xs px-2.5 py-0.5 rounded-full font-semibold border ${
+                                isAccepted
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : evalData.resultStatus === 'Compilation Error'
+                                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-200'
+                              }`}
+                            >
+                              {evalData.resultStatus || 'Submitted'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            Evaluated against complete server test suite
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Score & Metrics */}
+                      <div className="flex items-center gap-3">
+                        {evalData.score !== undefined && (
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-400 block font-medium">SCORE</span>
+                            <span className="text-sm font-mono font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-lg">
+                              {evalData.score} / 100
+                            </span>
+                          </div>
+                        )}
+                        {evalData.totalTestCases !== undefined && (
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-400 block font-medium">TEST CASES</span>
+                            <span className="text-xs font-mono font-semibold text-slate-700">
+                              {evalData.testCasesPassed || 0} / {evalData.totalTestCases} passed
+                            </span>
+                          </div>
+                        )}
+                        {evalData.executionTime > 0 && (
+                          <div className="text-right">
+                            <span className="text-[10px] text-slate-400 block font-medium">RUNTIME</span>
+                            <span className="text-xs font-mono text-slate-600">
+                              {(evalData.executionTime * 1000).toFixed(0)} ms
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Compiler Output if any */}
+                    {evalData.compilerError && (
+                      <div className="space-y-1">
+                        <span className="text-amber-700 font-semibold text-xs flex items-center gap-1 font-sans">
+                          <AlertTriangle className="w-3.5 h-3.5" /> Compiler Output:
+                        </span>
+                        <pre className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-amber-900 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+                          {evalData.compilerError}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* Runtime Error if any */}
+                    {evalData.runtimeError && (
+                      <div className="space-y-1">
+                        <span className="text-rose-700 font-semibold text-xs flex items-center gap-1 font-sans">
+                          <AlertCircle className="w-3.5 h-3.5" /> Runtime Error:
+                        </span>
+                        <pre className="p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-rose-900 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+                          {evalData.runtimeError}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* Visible Test Case tabs */}
+                    {visibleTestResults.length > 0 && (
+                      <div className="space-y-2.5 pt-1">
+                        <span className="text-xs font-semibold text-slate-700">Sample Test Case Results:</span>
+                        <div className="flex items-center space-x-2 font-sans overflow-x-auto pb-1">
+                          {visibleTestResults.map((tc, idx) => (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() => setActiveSubmitTab(idx)}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium border flex items-center space-x-1.5 transition-all ${
+                                activeSubmitTab === idx
+                                  ? 'bg-slate-800 border-indigo-500 text-white shadow-xs'
+                                  : 'bg-slate-100 border-slate-200 text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  tc.passed ? 'bg-emerald-500' : 'bg-rose-500'
+                                }`}
+                              />
+                              <span>Case {idx + 1}</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {visibleTestResults[activeSubmitTab] && (
+                          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 font-mono text-xs space-y-2">
+                            <div>
+                              <span className="text-slate-500 font-sans text-[11px] font-semibold">Input:</span>
+                              <pre className="mt-0.5 p-2 rounded-lg bg-white border border-slate-200 text-slate-800 text-xs overflow-x-auto">
+                                {visibleTestResults[activeSubmitTab].input || '(no input)'}
+                              </pre>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 font-sans text-[11px] font-semibold">Expected:</span>
+                              <pre className="mt-0.5 p-2 rounded-lg bg-white border border-slate-200 text-emerald-700 font-semibold text-xs overflow-x-auto">
+                                {visibleTestResults[activeSubmitTab].expectedOutput || '(no expected output)'}
+                              </pre>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 font-sans text-[11px] font-semibold">Your Output:</span>
+                              <pre
+                                className={`mt-0.5 p-2 rounded-lg bg-white border border-slate-200 text-xs overflow-x-auto ${
+                                  visibleTestResults[activeSubmitTab].passed ? 'text-emerald-700' : 'text-rose-700'
+                                }`}
+                              >
+                                {visibleTestResults[activeSubmitTab].actualOutput !== undefined
+                                  ? visibleTestResults[activeSubmitTab].actualOutput
+                                  : '(empty output)'}
+                              </pre>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Navigation / Progress actions */}
+                    <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+                      <span className="text-xs text-slate-500">
+                        {currentQuestionIndex < (sessionData.questions.length - 1)
+                          ? `Question ${currentQuestionIndex + 1} submitted. Continue to Question ${currentQuestionIndex + 2} when ready.`
+                          : 'All questions completed. Review results or view your complete assessment scorecard.'}
+                      </span>
+
+                      {currentQuestionIndex < (sessionData.questions.length - 1) ? (
+                        <button
+                          type="button"
+                          id="next-question-button"
+                          onClick={() => {
+                            handleSaveCode();
+                            setCurrentQuestionIndex((prev) => prev + 1);
+                            setRunResult(null);
+                            setRunError('');
+                            setActiveTestTab(0);
+                          }}
+                          className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs flex items-center space-x-1.5 transition-all active:scale-95"
+                        >
+                          <span>Next Question</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          id="view-summary-button"
+                          onClick={() => setSessionState('completed')}
+                          className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs flex items-center space-x-1.5 transition-all active:scale-95"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>View Assessment Summary</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* POST-SUBMIT AI CODING REVIEW (Strictly visible ONLY when attempt is submitted or expired) */}
               {(currentAttempt?.status === 'submitted' || currentAttempt?.status === 'expired') && (
                 <div className="rounded-2xl border border-indigo-200 bg-indigo-50/30 p-4 sm:p-5 space-y-4 shadow-xs">
@@ -1165,56 +1465,7 @@ export const CodingRoundPage = () => {
         </div>
       )}
 
-      {/* Submit Confirmation Modal */}
-      {showSubmitModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in">
-          <div className="relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl space-y-4">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
-                <AlertCircle className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Confirm Question Submission</h3>
-                <p className="text-xs text-slate-500">
-                  Question {currentQuestionIndex + 1} of {sessionData?.questions?.length || 2}
-                </p>
-              </div>
-            </div>
-            <p className="text-sm text-slate-600 leading-relaxed">
-              Submit this solution? After submission, this question cannot be edited.
-            </p>
-            <div className="pt-3 flex items-center justify-end space-x-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowSubmitModal(false)}
-                disabled={submitting}
-                className="px-4 py-2 rounded-xl border border-slate-200 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                id="confirm-submit-modal-button"
-                onClick={() => handleSubmitQuestion(false)}
-                disabled={submitting}
-                className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs flex items-center space-x-2 transition-all active:scale-95 disabled:opacity-50"
-              >
-                {submitting ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Evaluating Solution...</span>
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Confirm & Submit</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+
 
       {/* ---------------- F. COMPLETION SCREEN ---------------- */}
       {sessionState === 'completed' && sessionData && (

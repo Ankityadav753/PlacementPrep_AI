@@ -66,6 +66,11 @@ const codingQuestionSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    slug: {
+      type: String,
+      trim: true,
+      index: true,
+    },
     description: {
       type: String,
       required: [true, 'Question description is required'],
@@ -84,6 +89,26 @@ const codingQuestionSchema = new mongoose.Schema(
       required: [true, 'Topic is required'],
       trim: true,
       index: true,
+    },
+    tags: {
+      type: [String],
+      default: [],
+    },
+    inputFormat: {
+      type: String,
+      default: '',
+    },
+    outputFormat: {
+      type: String,
+      default: '',
+    },
+    referenceUrl: {
+      type: String,
+      default: '',
+    },
+    attribution: {
+      type: String,
+      default: '',
     },
     constraints: {
       type: [String],

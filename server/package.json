@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test_step4.mjs && node test_step5.mjs && node test_step6.mjs && node test_step7.mjs && node test_step8.mjs && node test_step9.mjs && node test_step11.mjs",
+    "test": "node test_step4.mjs && node test_step5.mjs && node test_step6.mjs && node test_step7.mjs && node test_step8.mjs && node test_step9.mjs && node test_step11.mjs && node test_early_submission.mjs && node test_question_bank_100.mjs && node test_voice_interview_integration.mjs",
     "test:step4": "node test_step4.mjs",
     "test:step5": "node test_step5.mjs",
     "test:step6": "node test_step6.mjs",
@@ -16,6 +16,9 @@
     "test:step8": "node test_step8.mjs",
     "test:step9": "node test_step9.mjs",
     "test:step11": "node test_step11.mjs",
+    "test:early-submission": "node test_early_submission.mjs",
+    "test:bank100": "node test_question_bank_100.mjs",
+    "test:voice-interview": "node test_voice_interview_integration.mjs",
     "seed:coding": "node src/scripts/seedCodingQuestions.js"
   },
   "dependencies": {

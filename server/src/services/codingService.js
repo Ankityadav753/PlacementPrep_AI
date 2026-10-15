@@ -13,7 +13,7 @@ export const inMemoryReviews = new Map();
 
 // Initialize in-memory questions with stable IDs from curated bank
 codingQuestionsData.forEach((q, index) => {
-  const qId = `cq_${index + 1}`;
+  const qId = q.id || `cq_${index + 1}`;
   inMemoryQuestions.set(qId, {
     ...q,
     id: qId,
@@ -59,10 +59,16 @@ export const sanitizeQuestion = (questionDoc) => {
   return {
     id: safeId,
     _id: safeId,
+    slug: q.slug || '',
     title: q.title,
     description: q.description,
     difficulty: q.difficulty,
     topic: q.topic,
+    tags: q.tags || [],
+    inputFormat: q.inputFormat || '',
+    outputFormat: q.outputFormat || '',
+    referenceUrl: q.referenceUrl || '',
+    attribution: q.attribution || '',
     constraints: q.constraints || [],
     examples: q.examples || [],
     testCases: visibleTestCases,
@@ -115,6 +121,14 @@ export const startCodingSession = async (userId) => {
       await CodingQuestion.insertMany(codingQuestionsData);
     }
     selectedQuestions = await CodingQuestion.aggregate([{ $sample: { size: 2 } }]);
+    if (
+      selectedQuestions.length === 2 &&
+      (selectedQuestions[0]._id || selectedQuestions[0].id).toString() ===
+        (selectedQuestions[1]._id || selectedQuestions[1].id).toString()
+    ) {
+      const distinctQ = await CodingQuestion.findOne({ _id: { $ne: selectedQuestions[0]._id } });
+      if (distinctQ) selectedQuestions[1] = distinctQ;
+    }
   } else {
     const allQuestions = Array.from(inMemoryQuestions.values());
     const shuffled = [...allQuestions].sort(() => 0.5 - Math.random());
